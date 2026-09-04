@@ -3,6 +3,7 @@ import { generateText, Output } from "ai";
 import { z } from "zod";
 
 import { google } from "@ai-sdk/google";
+import { resolveLocationAliases } from "./locations.js";
 const PostSchema = z.object({
   post_type: z.enum(["OFFERING", "SEEKING", "IRRELEVANT"]),
 
@@ -26,9 +27,31 @@ const PostSchema = z.object({
     .nullable(),
 
   additional_preferences: z.array(z.string()),
+
+  image_url: z.string().nullable().optional(),
+  thumbnail_url: z.string().nullable().optional(),
 });
 
 const model = google("gemini-3.6-flash");
+const activeGeminiKey =
+  process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? "";
+
+console.log("[DEBUG] listingService Gemini API key:", {
+  GOOGLE_GENERATIVE_AI_API_KEY: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
+  GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+  activeGeminiKey,
+  activeKeyLength: activeGeminiKey.length,
+});
+
+function normalizeStoredUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+
+  const cleaned = value
+    .trim()
+    .replace(/^['"]+|['"]+$/g, "")
+    .trim();
+  return cleaned.length > 0 ? cleaned : null;
+}
 
 interface llmPost {
   author: string;
@@ -39,23 +62,28 @@ interface llmPost {
   rawPostId: string;
 }
 const promtp = "";
-export const answerMyQuestion = async (prompt: string) => {
+export const answerMyQuestion = async (prompt: string, imageUrl?: string) => {
+  // Include image URL in the prompt context for better extraction
+  const enhancedPrompt = imageUrl
+    ? `${prompt}\n\nImage URL: ${imageUrl}`
+    : prompt;
+
   const { output } = await generateText({
     model,
     output: Output.object({
       schema: PostSchema,
     }),
-    prompt,
+    prompt: `Extract a housing listing from the post below.\n\nReturn IRRELEVANT when it is not a concrete rental, roommate, sublet, or housing-wanted post. Do not infer missing facts. Extract every location mentioned. Prefer the standard Bangalore area spelling when it is clear (for example, \"Koramangala\" rather than \"Kormanagla\").\n\nPost:\n${enhancedPrompt}`,
   });
 
-  return output;
+  // Ensure image_url is set in the output
+  if (imageUrl && !output.image_url) {
+    output.image_url = imageUrl;
+  }
+
+  output.image_url = normalizeStoredUrl(output.image_url) ?? null;
+  output.thumbnail_url = normalizeStoredUrl(output.thumbnail_url) ?? null;
+  output.location = (await resolveLocationAliases(output.location)) ?? [];
+
+  return output.post_type === "IRRELEVANT" ? null : output;
 };
-
-interface RawPost {
-  post_id: string;
-  raw_text: string;
-  author?: string;
-  source_group?: string;
-}
-
-async function filterRawPosts(posts: RawPost[]) {}

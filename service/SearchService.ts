@@ -2,14 +2,32 @@ import { UserSearchIntent } from "./UserPromt.js";
 
 import { RankingService } from "./rankingService.js";
 import { ListingRepository } from "../src/repository/listing.repository.js";
+import { formatListings, type FormattedResponse } from "./responseFormatter.js";
+import type { CanonicalLocation } from "./locations.js";
+
 const lisitinRep = new ListingRepository();
 const rankingService = new RankingService();
-export async function Search(userPrompt: string) {
+const activeGeminiKey =
+  process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? "";
+
+export async function Search(
+  userPrompt: string,
+  selectedLocation?: CanonicalLocation | null,
+): Promise<FormattedResponse> {
+  console.log("[DEBUG] SearchService Gemini API key:", {
+    GOOGLE_GENERATIVE_AI_API_KEY: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    activeGeminiKey,
+    activeKeyLength: activeGeminiKey.length,
+  });
   if (typeof userPrompt !== "string" || !userPrompt.trim()) {
     throw new Error("Invalid user prompt");
   }
 
-  const filteredPrompt = await UserSearchIntent(userPrompt);
+  const promptWithLocation = selectedLocation
+    ? `${userPrompt}\nSelected canonical location: ${selectedLocation.name}, ${selectedLocation.city}`
+    : userPrompt;
+  const filteredPrompt = await UserSearchIntent(promptWithLocation);
 
   const searchIntent = { ...filteredPrompt };
   if (filteredPrompt.post_type === "SEEKING") {
@@ -21,9 +39,8 @@ export async function Search(userPrompt: string) {
   const listing = await lisitinRep.searchIntent(searchIntent);
   const ranking = await rankingService.rankResults(listing);
 
-  return {
-    intent: filteredPrompt,
-    searchIntent,
-    results: ranking,
-  };
+  // Format the results into human-readable format
+  const formattedResponse = formatListings(ranking);
+
+  return formattedResponse;
 }

@@ -1,0 +1,1 @@
+{"version":3,"file":"SearchService.d.ts","sourceRoot":"","sources":["../../service/SearchService.ts"],"names":[],"mappings":"AAIA,OAAO,EAAkB,KAAK,iBAAiB,EAAE,MAAM,wBAAwB,CAAC;AAChF,OAAO,KAAK,EAAE,iBAAiB,EAAE,MAAM,gBAAgB,CAAC;AAOxD,wBAAsB,MAAM,CAC1B,UAAU,EAAE,MAAM,EAClB,gBAAgB,CAAC,EAAE,iBAAiB,GAAG,IAAI,GAC1C,OAAO,CAAC,iBAAiB,CAAC,CA8B5B"}

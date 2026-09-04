@@ -5,6 +5,8 @@ interface RawPost {
   raw_text: string;
   author?: string;
   source_group?: string;
+  image_url?: string[];
+  post_link?: string;
 }
 
 export async function savePosts(posts: RawPost[]) {

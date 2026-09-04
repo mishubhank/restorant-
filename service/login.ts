@@ -1,29 +1,42 @@
 import "dotenv/config";
-import { chromium } from "playwright";
+import { chromium, type BrowserContext } from "playwright";
 import fs from "node:fs";
-//import { supabase } from "../db/client.js";
+import { supabase } from "../db/client.js";
 const SESSION_FILE = "facebook-session.json";
 const GROUP_URL =
   "https://www.facebook.com/groups/838402552906457/?sorting_setting=CHRONOLOGICAL";
+const GROUP_PATH_PARTS = new URL(GROUP_URL).pathname.split("/").filter(Boolean);
+const GROUP_ID = GROUP_PATH_PARTS[GROUP_PATH_PARTS.length - 1];
+const IMAGE_BUCKET = "listing-images";
 import { savePosts } from "../db/rawPosts.js";
 interface RawPost {
   post_id: string; // not postId
   raw_text: string;
   author?: string;
   source_group?: string;
+  image_url?: string[];
+  post_link?: string;
 }
 async function main() {
   const browser = await chromium.launch({ headless: false });
 
-  let context;
+  let context: BrowserContext;
 
   if (!fs.existsSync(SESSION_FILE)) {
+    const facebookEmail = process.env.FACEBOOK_EMAIL;
+    const facebookPassword = process.env.FACEBOOK_PASSWORD;
+    if (!facebookEmail || !facebookPassword) {
+      throw new Error(
+        "Set FACEBOOK_EMAIL and FACEBOOK_PASSWORD in .env before logging in.",
+      );
+    }
+
     console.log("No session found. Logging in...");
     context = await browser.newContext();
     const page = await context.newPage();
     await page.goto("https://www.facebook.com/login");
-    await page.fill('input[name="email"]', "8959416033");
-    await page.fill('input[name="pass"]', "mishraji@123");
+    await page.fill('input[name="email"]', facebookEmail);
+    await page.fill('input[name="pass"]', facebookPassword);
     await page.getByRole("button", { name: "Log in" }).click();
 
     console.log("--------------------------------");
@@ -47,7 +60,85 @@ async function main() {
 
   // Track posts we've already logged, and count how many "new" posts
   // came in on the most recent scroll (used to detect we've hit the end).
+  function findPostImages(story: any): string[] {
+    const images = new Set<string>();
+    const attachments =
+      story?.attachments ??
+      story?.comet_sections?.content?.story?.attachments ??
+      [];
+
+    function walk(node: any) {
+      if (!node || typeof node !== "object") return;
+      if (node.image?.uri) images.add(node.image.uri);
+      for (const value of Object.values(node)) {
+        Array.isArray(value) ? value.forEach(walk) : walk(value);
+      }
+    }
+
+    attachments.forEach(walk);
+    return Array.from(images);
+  }
+  function findPostLink(story: any, postId: string | undefined): string | null {
+    // Try direct fields FB sometimes provides
+    if (typeof story?.wwwURL === "string") return story.wwwURL;
+    if (typeof story?.url === "string") return story.url;
+
+    // Fallback: construct manually from group + post id
+    if (postId && GROUP_ID) {
+      return `https://www.facebook.com/groups/${GROUP_ID}/posts/${postId}/`;
+    }
+
+    return null;
+  }
+
+  async function persistImages(
+    imageUrls: string[],
+    postId: string,
+  ): Promise<string[]> {
+    const storedUrls = await Promise.all(
+      imageUrls.slice(0, 5).map(async (imageUrl, index) => {
+        try {
+          // Uses the Playwright browser context, which has the Facebook
+          // session cookies needed to download signed CDN image URLs.
+          const imageResponse = await context.request.get(imageUrl);
+          if (!imageResponse.ok()) {
+            console.warn(
+              `Could not download image for ${postId}: ${imageResponse.status()}`,
+            );
+            return null;
+          }
+
+          const contentType =
+            imageResponse.headers()["content-type"]?.split(";")[0] ??
+            "image/jpeg";
+          const extension = contentType.includes("png") ? "png" : "jpg";
+          const path = `${postId}/${index}.${extension}`;
+          const { error } = await supabase.storage
+            .from(IMAGE_BUCKET)
+            .upload(path, await imageResponse.body(), {
+              contentType,
+              upsert: true,
+            });
+
+          if (error) {
+            console.warn(`Could not store image for ${postId}:`, error.message);
+            return null;
+          }
+
+          return supabase.storage.from(IMAGE_BUCKET).getPublicUrl(path).data
+            .publicUrl;
+        } catch (error) {
+          console.warn(`Could not persist image for ${postId}:`, error);
+          return null;
+        }
+      }),
+    );
+
+    return storedUrls.filter((url): url is string => Boolean(url));
+  }
+
   const seenPostIds = new Set<string>();
+
   let sinceLastNewPost = 0;
 
   function findPostText(obj: any): string | null {
@@ -100,17 +191,20 @@ async function main() {
           if (postId) seenPostIds.add(postId);
 
           sinceLastNewPost = 0; // got a new post, reset the "stall" counter
-          /// rX*RqNnS$dnjR@4
           console.log("--------------------------------");
           console.log("Op:", operation);
           console.log("Author:", story?.feedback?.owning_profile?.name);
           console.log("Post:", findPostText(story) ?? "NOT FOUND");
           console.log("Post ID:", postId);
+          const imageUrls = await persistImages(findPostImages(story), postId);
+          const postLink = findPostLink(story, postId);
           collectedPosts.push({
             post_id: postId,
             author: story?.feedback?.owning_profile?.name,
             raw_text: findPostText(story) ?? "NOT FOUND",
-            source_group: story?.feedback?.owning_profile?.name,
+            source_group: GROUP_URL,
+            image_url: imageUrls,
+            ...(postLink ? { post_link: postLink } : {}),
           });
         }
       }
@@ -127,18 +221,34 @@ async function main() {
   // MAIN SCROLL LOOP
   const collectedPosts: RawPost[] = [];
   // -----------------------------
+  // -----------------------------
   try {
     while (true) {
-      const moreButtons = page.getByRole("button", {
-        name: /see more|show more posts|view more/i,
-      });
-      const count = await moreButtons.count().catch(() => 0);
-      for (let i = 0; i < count; i++) {
-        try {
-          await moreButtons.nth(i).click({ timeout: 1000 });
-          await page.waitForTimeout(500);
-        } catch {
-          // button may have detached/disappeared, ignore
+      // Bail out of any unexpected modal/dialog (e.g. comment lightbox) before continuing
+      const dialog = page.getByRole("dialog");
+      if ((await dialog.count().catch(() => 0)) > 0) {
+        console.log("Unexpected dialog/modal detected — closing it.");
+        await page.keyboard.press("Escape").catch(() => {});
+        await page.waitForTimeout(500);
+      }
+
+      // Only expand "See more" on truncated POST text, scoped per-post
+      const postArticles = page.locator('[role="article"]');
+      const articleCount = await postArticles.count().catch(() => 0);
+
+      for (let a = 0; a < articleCount; a++) {
+        const article = postArticles.nth(a);
+        const moreButtons = article.getByRole("button", {
+          name: /^see more$/i,
+        });
+        const count = await moreButtons.count().catch(() => 0);
+        for (let i = 0; i < count; i++) {
+          try {
+            await moreButtons.nth(i).click({ timeout: 1000 });
+            await page.waitForTimeout(500);
+          } catch {
+            // button may have detached/disappeared, ignore
+          }
         }
       }
 

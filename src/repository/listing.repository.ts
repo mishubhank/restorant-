@@ -7,9 +7,44 @@ interface SearchIntent {
   max_budget?: number | null;
   gender_preference?: "MALE" | "FEMALE" | "ANY" | null;
   pet_preference?: "ALLOWED" | "NOT_ALLOWED" | "PREFERRED" | null;
+  furnishing?: "FULLY_FURNISHED" | "SEMI_FURNISHED" | "UNFURNISHED" | null;
+  food_preference?: "VEGETARIAN_ONLY" | "NON_VEG_ALLOWED" | "ANY" | null;
+  location_id?: number | null;
 }
 
 export class ListingRepository {
+  private matchesIntent(listing: any, intent: SearchIntent): boolean {
+    if (intent.post_type && listing.post_type !== intent.post_type) return false;
+    if (
+      intent.max_budget != null &&
+      (listing.price_max == null || listing.price_max > intent.max_budget)
+    ) {
+      return false;
+    }
+    if (
+      intent.min_budget != null &&
+      (listing.price_min == null || listing.price_min < intent.min_budget)
+    ) {
+      return false;
+    }
+    if (
+      intent.gender_preference &&
+      intent.gender_preference !== "ANY" &&
+      listing.gender_preference !== intent.gender_preference
+    ) {
+      return false;
+    }
+    if (intent.furnishing && listing.furnishing !== intent.furnishing) return false;
+    if (
+      intent.food_preference &&
+      intent.food_preference !== "ANY" &&
+      listing.food_preference !== intent.food_preference
+    ) {
+      return false;
+    }
+    return true;
+  }
+
   async saveListing(listing: any) {
     const { data, error } = await supabase
       .from("listings")
@@ -19,7 +54,7 @@ export class ListingRepository {
 
     if (error) {
       console.error("Error inserting listing:", error);
-      return null;
+      throw error;
     }
     return data;
   }
@@ -39,6 +74,12 @@ export class ListingRepository {
     if (intent.gender_preference && intent.gender_preference !== "ANY") {
       query = query.eq("gender_preference", intent.gender_preference);
     }
+    if (intent.furnishing) {
+      query = query.eq("furnishing", intent.furnishing);
+    }
+    if (intent.food_preference && intent.food_preference !== "ANY") {
+      query = query.eq("food_preference", intent.food_preference);
+    }
 
     if (intent.location != null && intent.location.length) {
       query = query.overlaps("location", intent.location);
@@ -46,19 +87,20 @@ export class ListingRepository {
     const { data } = await query;
     if (data && data.length) return data;
 
-    // Fallback: broaden budget and do fuzzy location matching when no results
+    // Fallback: use typo-tolerant, case-insensitive location matching. The
+    // RPC intentionally searches only locations, so retain every other user
+    // constraint here before returning its results.
     console.log(
       "No results from primary query — running fallback/widened search...",
     );
 
-    const locToken =
-      intent.location && intent.location.length ? intent.location[0] : null;
+    const locTerms = intent.location?.filter(Boolean) ?? [];
 
-    if (locToken) {
+    if (locTerms.length) {
       try {
         const { data: fuzzyLocationData, error: fuzzyLocationError } =
           await supabase.rpc("search_listings_by_location", {
-            search_term: locToken,
+            search_terms: locTerms,
           });
 
         if (fuzzyLocationError) {
@@ -69,7 +111,10 @@ export class ListingRepository {
         }
 
         if (fuzzyLocationData && fuzzyLocationData.length) {
-          return fuzzyLocationData;
+          const matchingListings = fuzzyLocationData.filter((listing: any) =>
+            this.matchesIntent(listing, intent),
+          );
+          if (matchingListings.length) return matchingListings;
         }
       } catch (error) {
         console.warn(
@@ -79,7 +124,24 @@ export class ListingRepository {
       }
     }
 
+    // Never replace a requested area with arbitrary city-wide results. A
+    // nearby-area fallback must be distance-based and therefore needs stored
+    // coordinates; see the database migration for the typo-tolerant layer.
+    if (locTerms.length) return [];
+
     let fallbackQuery = supabase.from("listings").select("*");
+    if (intent.post_type) {
+      fallbackQuery = fallbackQuery.eq("post_type", intent.post_type);
+    }
+    if (intent.gender_preference && intent.gender_preference !== "ANY") {
+      fallbackQuery = fallbackQuery.eq("gender_preference", intent.gender_preference);
+    }
+    if (intent.furnishing) {
+      fallbackQuery = fallbackQuery.eq("furnishing", intent.furnishing);
+    }
+    if (intent.food_preference && intent.food_preference !== "ANY") {
+      fallbackQuery = fallbackQuery.eq("food_preference", intent.food_preference);
+    }
     // widen budget by 25%
     if (intent.max_budget != null) {
       const widenedMax = Math.round(intent.max_budget * 1.25);
@@ -88,13 +150,6 @@ export class ListingRepository {
     if (intent.min_budget != null) {
       const widenedMin = Math.round((intent.min_budget ?? 0) * 0.8);
       fallbackQuery = fallbackQuery.gte("price_min", widenedMin);
-    }
-
-    const fuzzyToken = locToken ? `%${locToken}%` : null;
-    if (fuzzyToken) {
-      fallbackQuery = fallbackQuery.or(
-        `property_type.ilike.${fuzzyToken},author.ilike.${fuzzyToken}`,
-      );
     }
 
     const { data: fallbackData } = await fallbackQuery;

@@ -6,8 +6,9 @@
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "nodemon --watch src --ext ts --exec tsx src/server.ts",
+    "dev": "nodemon --watch src --watch service --watch db --ext ts --exec tsx src/server.ts",
     "login:facebook": "tsx service/login.ts",
+    "process:posts": "tsx service/processRawPosts.ts",
     "build": "tsc",
     "start": "node dist/src/server.js"
   },
@@ -22,6 +23,8 @@
     "@supabase/ssr": "^0.12.4",
     "@supabase/supabase-js": "^2.112.0",
     "ai": "^7.0.52",
+    "axios": "^1.19.0",
+    "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "mongodb": "^7.2.0",

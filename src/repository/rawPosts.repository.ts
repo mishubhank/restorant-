@@ -26,8 +26,26 @@ export class RawPostsRepository {
       .from("raw_posts")
       .update({ is_processed: true })
       .eq("post_id", postId);
+
+    if (error) {
+      console.error("Error marking post as processed:", error);
+      throw error;
+    }
+    return data;
   }
-  async markIgnore(postId: string) {}
+
+  async markIgnore(postId: string) {
+    const { data, error } = await supabase
+      .from("raw_posts")
+      .update({ is_processed: true, is_ignored: true })
+      .eq("post_id", postId);
+
+    if (error) {
+      console.error("Error marking post as ignored:", error);
+      throw error;
+    }
+    return data;
+  }
 }
 const repo = new RawPostsRepository();
 
